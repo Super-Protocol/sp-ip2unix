@@ -484,10 +484,12 @@ int Socket::accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
         // We use SO_PEERCRED to get uid, gid and pid in order to generate
         // unique IP addresses.
         ucred peercred;
-        socklen_t len = sizeof peercred;
 
-        if (getsockopt(sockfd, SOL_SOCKET, SO_PEERCRED, &peercred, &len) == -1)
-            return -1;
+        //not supported in gramine
+        //socklen_t len = sizeof peercred;
+
+        //if (getsockopt(sockfd, SOL_SOCKET, SO_PEERCRED, &peercred, &len) == -1)
+        //    return -1;
 
         if (!peer.set_host(peercred)) {
             errno = EINVAL;

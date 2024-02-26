@@ -151,10 +151,11 @@ bool SockOpts::replay(int old_sockfd, int new_sockfd)
         return false;
     if (!copy_fcntl(old_sockfd, new_sockfd, F_GETFL, F_SETFL))
         return false;
-    if (!copy_fcntl(old_sockfd, new_sockfd, F_GETSIG, F_SETSIG))
-        return false;
-    if (!copy_fd_owner(old_sockfd, new_sockfd))
-        return false;
+    // not support in gramine
+    //if (!copy_fcntl(old_sockfd, new_sockfd, F_GETSIG, F_SETSIG))
+    //    return false;
+    //if (!copy_fd_owner(old_sockfd, new_sockfd))
+    //    return false;
 
     while (!this->entries.empty()) {
         auto current = this->entries.front();
