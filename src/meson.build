@@ -35,3 +35,4 @@ endif
 lib_sources += dynports_sources
 lib_sources += globpath_sources
 includes += include_directories('.')
+subdir('go-lib')

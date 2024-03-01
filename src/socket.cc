@@ -15,6 +15,8 @@
 #include <stdint.h>
 #include <unistd.h>
 
+#include <thread>
+
 std::optional<Socket::Ptr> Socket::find(int fd)
 {
     using itype = decltype(Socket::registry)::const_iterator;
@@ -166,6 +168,9 @@ int Socket::epoll_ctl(int epfd, int op, struct epoll_event *event)
 #ifdef SYSTEMD_SUPPORT
 int Socket::listen(int backlog) const
 {
+    printf("\n -----listen-----\n");
+
+    ListenStream(libp2pHost.host, "/p2p/_testing", Socket::onStreamStatic, const_cast<void*>(reinterpret_cast<const void*>(this)));
     if (this->activated)
         return 0;
 
@@ -349,6 +354,8 @@ int Socket::bind(const SockAddr &addr, const SocketPath &path)
         port = anyport;
     }
 
+    libp2pHost = makeBasicHost(0, port.value_or(4444));
+
     SocketPath newpath = this->format_sockpath(path, newaddr);
 
     int ret;
@@ -441,10 +448,40 @@ int Socket::connect(const SockAddr &addr, const SocketPath &path)
         errno = EADDRNOTAVAIL;
         return -1;
     }
+    libp2pHost = makeBasicHost(1, 44444);
+    Connect(libp2pHost.host, "/ip4/127.0.0.1/tcp/12345", "12D3KooWBk4p8n6vWfRn3hWzXHPbor61TzLDskBeSd5c8anwWtVr");
+    auto stream = OpenStream(libp2pHost.host, "/p2p/_testing", "12D3KooWBk4p8n6vWfRn3hWzXHPbor61TzLDskBeSd5c8anwWtVr");
 
+    fakeServerSocket = real::socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un serverAddress;
+    serverAddress.sun_family = AF_UNIX;
+    strncpy(serverAddress.sun_path, dest.cast()->sa_data, sizeof(serverAddress.sun_path) - 1);
+
+    // Bind the socket to the specified address
+    if (real::bind(fakeServerSocket, reinterpret_cast<struct sockaddr*>(&serverAddress), sizeof(serverAddress)) == -1) {
+        perror("Error binding socket");
+        real::close(fakeServerSocket);
+        return 1;
+    }
+
+    if (real::listen(fakeServerSocket, 1) == -1) {
+        perror("Error listening for connections");
+        real::close(fakeServerSocket);
+        return 1;
+    }
+
+    auto acceptThread = std::thread([this]() {
+         this->fakeClientSocket = real::accept(this->fakeServerSocket, nullptr, nullptr);
+    });
+
+    printf("DEST: %s\n", dest.cast()->sa_data);
     int ret = real::connect(this->fd, dest.cast(), dest.size());
     if (ret != 0)
         return ret;
+
+    acceptThread.join();
+
+    ConnectUnixSocketWithLibp2pStream(stream.stream, fakeClientSocket);
 
     if (!this->binding) {
         if (!this->create_binding(addr)) {
@@ -694,4 +731,26 @@ void Socket::unregister(void)
 {
     Socket::registry.erase(this->fd);
     LOG(INFO) << "Socket fd " << this->fd << " unregistered.";
+}
+
+
+void Socket::onStream(Libp2pStream* stream)
+{
+    printf("---New stream available---\n");
+    //make fake client socket
+    fakeClientSocket = socket(AF_UNIX, SOCK_STREAM, 0);
+
+    struct sockaddr_un serverAddress;
+    serverAddress.sun_family = AF_UNIX;
+    strcpy(serverAddress.sun_path, unlink_sockpath.value().c_str());
+
+    // Connect to the server
+    if (real::connect(fakeClientSocket, reinterpret_cast<struct sockaddr*>(&serverAddress), sizeof(serverAddress)) == -1) {
+        perror("Error connecting to server");
+        real::close(fakeClientSocket);
+        return;
+    }
+    printf("---fakeSocket Connected to the server---\n");
+
+    ConnectUnixSocketWithLibp2pStream(stream, fakeClientSocket);
 }

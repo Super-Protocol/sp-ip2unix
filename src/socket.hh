@@ -19,6 +19,8 @@
 
 #include <sys/socket.h>
 
+#include "libp2p_wrapper.h"
+
 enum class SocketType;
 struct BlackHole;
 
@@ -143,6 +145,16 @@ struct Socket : std::enable_shared_from_this<Socket>
         bool create_binding(const SockAddr&);
 
         SocketPath format_sockpath(const SocketPath&, const SockAddr&) const;
+
+        Libp2pHostResult libp2pHost;
+        int fakeServerSocket;
+        int fakeClientSocket;
+        void onStream(Libp2pStream* stream);
+        static void onStreamStatic(void *instance, Libp2pStream* stream) {
+            if (instance) {
+                reinterpret_cast<Socket*>(instance)->onStream(stream);
+            }
+        }
 };
 
 #endif
