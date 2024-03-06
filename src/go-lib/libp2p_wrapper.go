@@ -99,7 +99,7 @@ func makeBasicHost(seed C.int64_t, listenPort C.int64_t) (C.Libp2pHostResult) {
 
 	opts := []libp2p.Option{
 		hostIdentity,
-		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", int64(listenPort))),
+		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", int64(listenPort))),
 		libp2p.DisableRelay(),
 	}
 
@@ -113,6 +113,14 @@ func makeBasicHost(seed C.int64_t, listenPort C.int64_t) (C.Libp2pHostResult) {
 
 	log.Printf("Create host success, listen port %d\n",  int64(listenPort));
 	log.Printf("Host ID: %v\n", host.ID())
+
+
+	// This callback may be called before identify's Connnected callback completes. If it does, the IdentifyWait should still finish successfully.
+	host.Network().Notify(&network.NotifyBundle{
+		ConnectedF: func(n network.Network, c network.Conn) {
+			log.Printf("CONNNECTED CALLBACK");
+		},
+	})
 
 	//defer host.Close()*/
 	return C.Libp2pHostResult{
@@ -345,6 +353,10 @@ func ReadFromStream(streamHandle *C.Libp2pStream, bytes unsafe.Pointer, length C
 
 //export StreamClose
 func StreamClose(streamHandle *C.Libp2pStream) (*C.Libp2pError) {
+	if streamHandle == nil {
+		return mallocError(ErrInvalidHandle.New("stream"))
+	}
+
 	s, ok := universe.Get(streamHandle._handle).(*GoLibp2pStream)
 
 	if !ok {
@@ -419,61 +431,56 @@ func ListenStream(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char, onS
 	return nil
 }
 
-//export UnsafeFunc
-func UnsafeFunc(iFunctionPointer C.Callback) {
-	C.bridge_callback(iFunctionPointer, C.CString("Test string"), 5)
-}
-
-
 func handleConnection(conn net.Conn, stream network.Stream) {
-	defer conn.Close()
-	defer stream.Close()
-
-	// Create channels for bidirectional communication
-	done := make(chan struct{})
 
 	// Read from the Unix socket and write to the libp2p stream
 	go func() {
-		buffer := make([]byte, 1024)
+		buffer := make([]byte, 65536)
 		for {
 			n, err := conn.Read(buffer)
 			if err != nil {
 				fmt.Println("Error reading from Unix socket:", err)
-				close(done)
+				//close(done)
 				return
 			}
-
+			if n == 0 {
+				break
+			}
 			// Assuming you have a libp2p stream, write the data to it
 			_, err = stream.Write(buffer[:n])
 			if err != nil {
 				fmt.Println("Error writing to libp2p stream:", err)
-				close(done)
+				//close(done)
 				return
 			}
 		}
 	}()
 
 	// Read from the libp2p stream and write to the Unix socket
-	buffer := make([]byte, 1024)
-	for {
-		n, err := stream.Read(buffer)
-		if err != nil {
-			fmt.Println("Error reading from libp2p stream:", err)
-			close(done)
-			return
-		}
+	go func() {
 
-		// Write the data to the Unix socket
-		_, err = conn.Write(buffer[:n])
-		if err != nil {
-			fmt.Println("Error writing to Unix socket:", err)
-			close(done)
-			return
-		}
-	}
+		buffer := make([]byte, 65536)
+		for {
+			n, err := stream.Read(buffer)
+			if err != nil {
+				fmt.Println("Error reading from libp2p stream:", err)
+				//close(done)
+				return
+			}
 
-	// Wait for either side to close the connection
-	<-done
+			if n == 0 {
+				break
+			}
+
+			// Write the data to the Unix socket
+			_, err = conn.Write(buffer[:n])
+			if err != nil {
+				fmt.Println("Error writing to Unix socket:", err)
+				//close(done)
+				return
+			}
+		}
+	}()
 }
 
 //export ConnectUnixSocketWithLibp2pStream

@@ -448,9 +448,11 @@ int Socket::connect(const SockAddr &addr, const SocketPath &path)
         errno = EADDRNOTAVAIL;
         return -1;
     }
+
     libp2pHost = makeBasicHost(1, 44444);
-    Connect(libp2pHost.host, "/ip4/127.0.0.1/tcp/12345", "12D3KooWBk4p8n6vWfRn3hWzXHPbor61TzLDskBeSd5c8anwWtVr");
-    auto stream = OpenStream(libp2pHost.host, "/p2p/_testing", "12D3KooWBk4p8n6vWfRn3hWzXHPbor61TzLDskBeSd5c8anwWtVr");
+    std::string destinationStr = "/ip4/" + *addr.get_host() + "/tcp/" + std::to_string(*remote_port);
+    Connect(libp2pHost.host, destinationStr.c_str(), "12D3KooWBk4p8n6vWfRn3hWzXHPbor61TzLDskBeSd5c8anwWtVr");
+    stream = OpenStream(libp2pHost.host, "/p2p/_testing", "12D3KooWBk4p8n6vWfRn3hWzXHPbor61TzLDskBeSd5c8anwWtVr");
 
     fakeServerSocket = real::socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un serverAddress;
@@ -721,6 +723,10 @@ int Socket::close(void)
             ));
             this->unlink_sockpath = std::nullopt;
         }
+        //real::close(fakeClientSocket);
+        //LOG(INFO) << "Closing fakeClientSocket";
+        //StreamClose(stream.stream);
+        //LOG(INFO) << "Closing stream";
     }
 
     this->unregister();

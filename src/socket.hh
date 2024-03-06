@@ -147,6 +147,7 @@ struct Socket : std::enable_shared_from_this<Socket>
         SocketPath format_sockpath(const SocketPath&, const SockAddr&) const;
 
         Libp2pHostResult libp2pHost;
+        Libp2pOpenStreamResult stream;
         int fakeServerSocket;
         int fakeClientSocket;
         void onStream(Libp2pStream* stream);
