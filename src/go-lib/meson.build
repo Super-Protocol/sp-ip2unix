@@ -1,4 +1,4 @@
-go_library_name = 'libp2p_wrapper.a'
+go_library_name = 'libp2p_wrapper.so'
 
 go_library = custom_target('go_library',
   input: 'build.py',

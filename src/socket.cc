@@ -170,7 +170,13 @@ int Socket::listen(int backlog) const
 {
     printf("\n -----listen-----\n");
 
-    ListenStream(libp2pHost.host, "/p2p/_testing", Socket::onStreamStatic, const_cast<void*>(reinterpret_cast<const void*>(this)));
+    if (this->binding) {
+        auto remote_port = (*this->binding).get_port();
+        std::string streamName = "/overlay/" + std::to_string(*remote_port);
+        printf("Listen stream: %s", streamName.c_str());
+        ListenStream((*libp2pHost).host, streamName.c_str(), Socket::onStreamStatic, const_cast<void*>(reinterpret_cast<const void*>(this)));
+    }
+
     if (this->activated)
         return 0;
 
@@ -354,7 +360,7 @@ int Socket::bind(const SockAddr &addr, const SocketPath &path)
         port = anyport;
     }
 
-    libp2pHost = makeBasicHost(0, port.value_or(4444));
+
 
     SocketPath newpath = this->format_sockpath(path, newaddr);
 
@@ -449,10 +455,22 @@ int Socket::connect(const SockAddr &addr, const SocketPath &path)
         return -1;
     }
 
-    libp2pHost = makeBasicHost(1, 44444);
-    std::string destinationStr = "/ip4/" + *addr.get_host() + "/tcp/" + std::to_string(*remote_port);
-    Connect(libp2pHost.host, destinationStr.c_str(), "12D3KooWBk4p8n6vWfRn3hWzXHPbor61TzLDskBeSd5c8anwWtVr");
-    stream = OpenStream(libp2pHost.host, "/p2p/_testing", "12D3KooWBk4p8n6vWfRn3hWzXHPbor61TzLDskBeSd5c8anwWtVr");
+    auto overlayRemoteHost = routeMap.find(*addr.get_host());
+    if (overlayRemoteHost == routeMap.end()) {
+        errno = EADDRNOTAVAIL;
+        return -1;
+    }
+
+
+    //TODO: Check and wait for connection
+
+    std::string streamName = "/overlay/" + std::to_string(*remote_port);
+    while(1) {
+        openStream = OpenStream((*libp2pHost).host, streamName.c_str(), overlayRemoteHost->second.id.c_str());
+        if (openStream.error == nullptr)
+            break;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
 
     fakeServerSocket = real::socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un serverAddress;
@@ -483,7 +501,7 @@ int Socket::connect(const SockAddr &addr, const SocketPath &path)
 
     acceptThread.join();
 
-    ConnectUnixSocketWithLibp2pStream(stream.stream, fakeClientSocket);
+    ConnectUnixSocketWithLibp2pStream(openStream.stream, fakeClientSocket);
 
     if (!this->binding) {
         if (!this->create_binding(addr)) {
@@ -760,3 +778,35 @@ void Socket::onStream(Libp2pStream* stream)
 
     ConnectUnixSocketWithLibp2pStream(stream, fakeClientSocket);
 }
+
+void OnRecvServiceMsg(const char *peerId, uint8_t *data, uint32_t dataSize)
+{
+    printf("Recv new message from peer %s. Msg size: %d\n", peerId, dataSize);
+    return;
+}
+
+void addServiceStream(void *stub, Libp2pStream* stream)
+{
+    // TODO: check result
+    Libp2pStringResult res = GetPeerIdFromStream(stream);
+    serviceStreamList[std::string(res.string)] = stream;
+    printf("addServiceStream: %s", res.string);
+    RegisterMsgHandler(stream, OnRecvServiceMsg);
+    uint8_t buffer[10];
+    buffer[0] = 'H';
+    buffer[1] = 'e';
+    buffer[2] = 'l';
+    buffer[3] = 'l';
+    buffer[4] = 'o';
+    buffer[5] = 'H';
+    buffer[6] = 'e';
+    buffer[7] = 'l';
+    buffer[8] = 'l';
+
+    WriteToServiceStream(stream, buffer, 5);
+    WriteToServiceStream(stream, buffer, 6);
+    WriteToServiceStream(stream, buffer, 7);
+    WriteToServiceStream(stream, buffer, 8);
+
+    free((void *)res.string);
+};

@@ -16,6 +16,7 @@
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
+#include <list>
 
 #include <sys/socket.h>
 
@@ -146,8 +147,7 @@ struct Socket : std::enable_shared_from_this<Socket>
 
         SocketPath format_sockpath(const SocketPath&, const SockAddr&) const;
 
-        Libp2pHostResult libp2pHost;
-        Libp2pOpenStreamResult stream;
+        Libp2pOpenStreamResult openStream;
         int fakeServerSocket;
         int fakeClientSocket;
         void onStream(Libp2pStream* stream);
@@ -157,5 +157,13 @@ struct Socket : std::enable_shared_from_this<Socket>
             }
         }
 };
+
+extern std::optional<Libp2pHostResult> libp2pHost;
+extern OverlayRouteMap routeMap;
+extern std::unordered_map<std::string, Libp2pStream*> serviceStreamList;
+
+void addServiceStream(void *stub, Libp2pStream* stream);
+
+
 
 #endif

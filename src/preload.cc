@@ -6,6 +6,7 @@
 #include "serial.hh"
 #include "sockaddr.hh"
 #include "socket.hh"
+#include "types.hh"
 
 #ifdef SYSTEMD_SUPPORT
 #include "systemd.hh"
@@ -20,6 +21,9 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <fstream>
+#include <list>
+#include <thread>
 
 #include <errno.h>
 #include <stdint.h>
@@ -27,6 +31,9 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include "rapidjson/document.h"
+#include "rapidjson/filereadstream.h"
 
 #ifndef WRAP_SYM
 #define WRAP_SYM(x) ip2unix_wrap_##x
@@ -40,6 +47,10 @@ static std::mutex g_rules_mutex;
 static std::shared_ptr<const std::vector<Rule>> g_rules = nullptr;
 
 using RuleMatch = std::optional<std::pair<size_t, const Rule>>;
+
+std::optional<Libp2pHostResult> libp2pHost;
+OverlayRouteMap routeMap  __attribute__((init_priority(1000)));
+std::unordered_map<std::string, Libp2pStream*> serviceStreamList __attribute__((init_priority(1001)));
 
 static void init_rules(void)
 {
@@ -689,4 +700,149 @@ extern "C" int WRAP_SYM(close)(int fd)
     }, [&]() {
         return real::close(fd);
     });
+}
+
+
+inline bool ends_with(std::string const & value, std::string const & ending)
+{
+    if (ending.size() > value.size())
+        return false;
+    return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
+}
+
+std::string JsonGetStringOrDefault(const rapidjson::Value& value, const std::string &key, const std::string& defaultValue = "") {
+    const char* keyStr = key.c_str();
+    if (value.IsObject() && value.HasMember(keyStr) && value[keyStr].IsString()) {
+        return value[keyStr].GetString();
+    }
+
+    return defaultValue;
+}
+
+int JsonGetNumOrDefault(const rapidjson::Value& value, const std::string &key, int defaultValue = 0) {
+    const char* keyStr = key.c_str();
+    if (value.IsObject() && value.HasMember(keyStr) && value[keyStr].IsInt()) {
+        return value[keyStr].GetInt();
+    }
+
+    return defaultValue;
+}
+
+__attribute__((constructor))
+static int enrtypoint(int argc, char *argv[]) {
+    if (argc > 0 && ends_with(argv[0], "ip2unix")) {
+        return 0;
+    }
+    printf("I am entrypoint\n");
+    const char* configFile = std::getenv("SP_OVERLAY_CONF");
+
+    // Проверка, найдена ли переменная окружения
+    if (!configFile) {
+        std::cerr << "SP_OVERLAY_CONF env param not passed" << std::endl;
+        return 1;
+    }
+
+    std::ifstream file(configFile);
+    if (!file.is_open()) {
+        std::cerr << "Error opening file\n";
+        return 1;
+    }
+
+    // Read the content of the file into a string
+    std::string jsonString((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+
+    rapidjson::Document document;
+    document.Parse(jsonString.c_str());
+
+    if (document.HasParseError()) {
+        std::cerr << "Error parsing JSON\n";
+        return 1;
+    }
+
+    if (!document.HasMember("config") || !document["config"].IsObject()) {
+        std::cerr << "JSON is missing 'config' object." << std::endl;
+        return 1;
+    }
+
+    // Получаем объект "config"
+    const rapidjson::Value& config = document["config"];
+
+    std::string privateKey;
+    if (config.HasMember("hostPrivateKey") && config["hostPrivateKey"].IsObject()) {
+        const rapidjson::Value& hostPrivateKey = config["hostPrivateKey"];
+        privateKey = JsonGetStringOrDefault(hostPrivateKey, "key");
+        std::cout << "hostPrivateKey value: " << privateKey << std::endl;
+
+        std::string type = JsonGetStringOrDefault(hostPrivateKey, "type");
+        std::cout << "hostPrivateKey type: " << type << std::endl;
+
+    }
+    std::string hostInternalAddress = JsonGetStringOrDefault(config, "hostInternalAddress");
+    std::cout << "hostInternalAddress: " << hostInternalAddress << std::endl;
+
+    std::string authToken = JsonGetStringOrDefault(config, "networkAuthToken");
+    std::cout << "networkAuthToken: " << authToken << std::endl;
+
+    if (!config.HasMember("relayServers") || !config["relayServers"].IsArray()) {
+        std::cerr << "JSON is missing 'relayServers' object." << std::endl;
+        return 1;
+    }
+
+    const rapidjson::Value& relays = config["relayServers"];
+    std::list<std::string> relaysList;
+    for (rapidjson::SizeType i = 0; i < relays.Size(); ++i) {
+        if (relays[i].IsString()) {
+            relaysList.emplace_back(relays[i].GetString());
+            std::cout << "Relay " << i+1 << ": " << relays[i].GetString() << std::endl;
+        }
+    }
+
+    if (!config.HasMember("routeMap") || !config["routeMap"].IsArray()) {
+        std::cerr << "JSON is missing 'routeMap' object." << std::endl;
+        return 1;
+    }
+
+    const rapidjson::Value& routes = config["routeMap"];
+    for (rapidjson::SizeType i = 0; i < routes.Size(); ++i) {
+        if (routes[i].IsObject()) {
+            std::string address = JsonGetStringOrDefault(routes[i], "internalAddress");
+            std::string id = JsonGetStringOrDefault(routes[i], "hostAddress");
+            std::string realAddress = JsonGetStringOrDefault(routes[i], "realAddress");
+            int port = JsonGetNumOrDefault(routes[i], "listenPort");
+            routeMap.emplace(address, OverlayRoute{address, id, port, realAddress});
+        }
+    }
+
+    int port = JsonGetNumOrDefault(config, "listenPort");
+    std::cout  << "ListenPort: " << port << std::endl;
+    libp2pHost = makeBasicHost(privateKey.c_str(), port);
+
+    Libp2pStringResult res = GetPeerIdFromHost((*libp2pHost).host);
+    std::string hostId(res.string);
+    free((void *)res.string);
+
+
+    ListenStream((*libp2pHost).host, "/overlay/service", addServiceStream, nullptr);
+
+    // Range-based for loop
+    for (const auto& rule : routeMap) {
+        std::string destinationStr = "/ip4/" + rule.second.realAddress + "/tcp/" + std::to_string(rule.second.port);
+        Connect((*libp2pHost).host, destinationStr.c_str(), rule.second.id.c_str());
+
+        if (hostId < rule.second.id) {
+            while(1) {
+                auto serviceStream = OpenStream((*libp2pHost).host, "/overlay/service", rule.second.id.c_str());
+                if (serviceStream.error == nullptr) {
+                    addServiceStream(nullptr, serviceStream.stream);
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        }
+    }
+
+    std::cout << "DONE" << std::endl;
+
+    return 0;
 }

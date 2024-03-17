@@ -4,3 +4,8 @@ void NewStream(OnStreamCallback f,  voidPtr additionalParams, Libp2pStream* stre
 {
     f(additionalParams, stream);
 }
+
+void NewMsg(OnRecvMsg f, const char *peerId, uint8_t *data, uint32_t dataSize)
+{
+    f(peerId, data, dataSize);
+}

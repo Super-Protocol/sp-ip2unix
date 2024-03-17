@@ -4,21 +4,24 @@ package main
 import "C"
 
 import (
-	"log"
-	"fmt"
-	"math/rand"
-	"unsafe"
 	"context"
-	"time"
+	"encoding/base64"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"log"
+	"math/rand"
 	"net"
 	"os"
+	"time"
+	"unsafe"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/p2p/host/autorelay"
 	basichost "github.com/libp2p/go-libp2p/p2p/host/basic"
-	"github.com/libp2p/go-libp2p/core/network"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	//"github.com/libp2p/go-libp2p/core/peerstore"
@@ -29,19 +32,19 @@ import (
 	logging "github.com/ipfs/go-log"
 	manet "github.com/multiformats/go-multiaddr/net"
 
-	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
-	"sync"
-	"reflect"
 	"bufio"
-)
+	"reflect"
+	"sync"
 
+	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
+	"golang.org/x/crypto/ed25519"
+)
 
 // safeConvertToInt converts the C.size_t to an int, and returns a boolean
 // indicating if the conversion was lossless and semantically equivalent.
 func safeConvertToInt(n C.size_t) (int, bool) {
 	return int(n), C.size_t(int(n)) == n && int(n) >= 0
 }
-
 
 type randomReader struct {
 	random *rand.Rand
@@ -94,11 +97,32 @@ type GoLibp2pStream struct {
 }
 
 //export makeBasicHost
-func makeBasicHost(seed C.int64_t, listenPort C.int64_t) (C.Libp2pHostResult) {
-	_, hostIdentity := getIdentity(int64(seed))
+func makeBasicHost(privateKeyBase64 *C.libp2p_const_char, listenPort C.int64_t) C.Libp2pHostResult {
+
+	privateKeyBytes, err := base64.StdEncoding.DecodeString(C.GoString(privateKeyBase64))
+	if err != nil {
+		return C.Libp2pHostResult{
+			error: mallocError(err),
+		}
+	}
+	if len(privateKeyBytes) != ed25519.PrivateKeySize {
+		fmt.Printf("Invalid key size %d, must be %d\n", len(privateKeyBytes), ed25519.PrivateKeySize)
+		return C.Libp2pHostResult{
+			error: mallocErrorRaw(0, "Invalid key size"),
+		}
+	}
+
+	privateKey := ed25519.PrivateKey(privateKeyBytes)
+	libp2pPrivateKey, err := crypto.UnmarshalEd25519PrivateKey(privateKey)
+
+	if err != nil {
+		return C.Libp2pHostResult{
+			error: mallocError(err),
+		}
+	}
 
 	opts := []libp2p.Option{
-		hostIdentity,
+		libp2p.Identity(libp2pPrivateKey),
 		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", int64(listenPort))),
 		libp2p.DisableRelay(),
 	}
@@ -111,14 +135,16 @@ func makeBasicHost(seed C.int64_t, listenPort C.int64_t) (C.Libp2pHostResult) {
 		}
 	}
 
-	log.Printf("Create host success, listen port %d\n",  int64(listenPort));
+	log.Printf("Create host success, listen port %d\n", int64(listenPort))
 	log.Printf("Host ID: %v\n", host.ID())
-
 
 	// This callback may be called before identify's Connnected callback completes. If it does, the IdentifyWait should still finish successfully.
 	host.Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(n network.Network, c network.Conn) {
-			log.Printf("CONNNECTED CALLBACK");
+			log.Printf("CONNNECTED CALLBACK")
+		},
+		DisconnectedF: func(n network.Network, c network.Conn) {
+			log.Printf("DISCONNNECTED CALLBACK")
 		},
 	})
 
@@ -129,7 +155,7 @@ func makeBasicHost(seed C.int64_t, listenPort C.int64_t) (C.Libp2pHostResult) {
 }
 
 //export CreateHost
-func CreateHost(listenAddr *C.libp2p_const_char, seed C.int64_t, relayAddr *C.libp2p_const_char, relayID *C.libp2p_const_char) (C.Libp2pHostResult) {
+func CreateHost(listenAddr *C.libp2p_const_char, seed C.int64_t, relayAddr *C.libp2p_const_char, relayID *C.libp2p_const_char) C.Libp2pHostResult {
 	//serverID, _ := getIdentity(0)
 	logging.SetLogLevel("p2p-holepunch", "DEBUG")
 	logging.SetLogLevel("relay", "DEBUG")
@@ -179,7 +205,7 @@ func CreateHost(listenAddr *C.libp2p_const_char, seed C.int64_t, relayAddr *C.li
 }
 
 //export Connect
-func Connect(hostHandle *C.Libp2pHost, addr *C.libp2p_const_char, peerID *C.libp2p_const_char) (*C.Libp2pError){
+func Connect(hostHandle *C.Libp2pHost, addr *C.libp2p_const_char, peerID *C.libp2p_const_char) *C.Libp2pError {
 
 	h, ok := universe.Get(hostHandle._handle).(*GoLibp2pHost)
 
@@ -229,11 +255,10 @@ func Connect(hostHandle *C.Libp2pHost, addr *C.libp2p_const_char, peerID *C.libp
 	}
 
 	return nil
-
 }
 
 //export WaitForPublicAddress
-func WaitForPublicAddress(hostHandle *C.Libp2pHost, attempts uint32, delay uint32) (*C.Libp2pError) {
+func WaitForPublicAddress(hostHandle *C.Libp2pHost, attempts uint32, delay uint32) *C.Libp2pError {
 
 	h, ok := universe.Get(hostHandle._handle).(*GoLibp2pHost)
 
@@ -247,7 +272,7 @@ func WaitForPublicAddress(hostHandle *C.Libp2pHost, attempts uint32, delay uint3
 	// Wait until external addresses is observed with server's NAT service.
 	idService := host.(*autorelay.AutoRelayHost).Host.(*basichost.BasicHost).IDService()
 	for i := uint32(0); i < attempts; i++ {
-		log.Printf("Attempt: %d\n", i + 1)
+		log.Printf("Attempt: %d\n", i+1)
 		for _, addr := range idService.OwnObservedAddrs() {
 			if manet.IsPublicAddr(addr) {
 				log.Printf("Observed self Addrs: %v\n", idService.OwnObservedAddrs())
@@ -261,11 +286,11 @@ func WaitForPublicAddress(hostHandle *C.Libp2pHost, attempts uint32, delay uint3
 }
 
 //export OpenStream
-func OpenStream(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char, peerID *C.libp2p_const_char) (C.Libp2pOpenStreamResult){
+func OpenStream(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char, peerID *C.libp2p_const_char) C.Libp2pOpenStreamResult {
 	h, ok := universe.Get(hostHandle._handle).(*GoLibp2pHost)
 
 	if !ok {
-		return C.Libp2pOpenStreamResult {
+		return C.Libp2pOpenStreamResult{
 			error: mallocError(ErrInvalidHandle.New("host")),
 		}
 	}
@@ -280,19 +305,19 @@ func OpenStream(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char, peerI
 	stream, err := host.NewStream(ctx, peer, protocol.ID(C.GoString(streamName)))
 	if err != nil {
 		log.Println(err)
-		return C.Libp2pOpenStreamResult {
+		return C.Libp2pOpenStreamResult{
 			error: mallocError(err),
 		}
 	}
 
-	log.Println("OpenStream Success");
+	log.Println("OpenStream Success")
 	return C.Libp2pOpenStreamResult{
 		stream: (*C.Libp2pStream)(mallocHandle(universe.Add(&GoLibp2pStream{&stream}))),
 	}
 }
 
 //export WriteToStream
-func WriteToStream(streamHandle *C.Libp2pStream, data *C.libp2p_const_char) (*C.Libp2pError) {
+func WriteToStream(streamHandle *C.Libp2pStream, data *C.libp2p_const_char) *C.Libp2pError {
 	s, ok := universe.Get(streamHandle._handle).(*GoLibp2pStream)
 
 	if !ok {
@@ -311,14 +336,13 @@ func WriteToStream(streamHandle *C.Libp2pStream, data *C.libp2p_const_char) (*C.
 	return nil
 }
 
-
 //export ReadFromStream
-func ReadFromStream(streamHandle *C.Libp2pStream, bytes unsafe.Pointer, length C.size_t) (C.Libp2pReadResult) {
+func ReadFromStream(streamHandle *C.Libp2pStream, bytes unsafe.Pointer, length C.size_t) C.Libp2pReadResult {
 	log.Println("ReadFromStream")
 	s, ok := universe.Get(streamHandle._handle).(*GoLibp2pStream)
 
 	if !ok {
-		return C.Libp2pReadResult {
+		return C.Libp2pReadResult{
 			error: mallocError(ErrInvalidHandle.New("stream")),
 		}
 	}
@@ -328,7 +352,7 @@ func ReadFromStream(streamHandle *C.Libp2pStream, bytes unsafe.Pointer, length C
 
 	ilength, ok := safeConvertToInt(length)
 	if !ok {
-		return C.Libp2pReadResult {
+		return C.Libp2pReadResult{
 			error: mallocError(ErrInvalidArg.New("length too large")),
 		}
 	}
@@ -352,7 +376,7 @@ func ReadFromStream(streamHandle *C.Libp2pStream, bytes unsafe.Pointer, length C
 }
 
 //export StreamClose
-func StreamClose(streamHandle *C.Libp2pStream) (*C.Libp2pError) {
+func StreamClose(streamHandle *C.Libp2pStream) *C.Libp2pError {
 	if streamHandle == nil {
 		return mallocError(ErrInvalidHandle.New("stream"))
 	}
@@ -370,12 +394,12 @@ func StreamClose(streamHandle *C.Libp2pStream) (*C.Libp2pError) {
 }
 
 //export ListenStreamBlock
-func ListenStreamBlock(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char) (C.Libp2pOpenStreamResult) {
+func ListenStreamBlock(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char) C.Libp2pOpenStreamResult {
 
 	h, ok := universe.Get(hostHandle._handle).(*GoLibp2pHost)
 
 	if !ok {
-		return C.Libp2pOpenStreamResult {
+		return C.Libp2pOpenStreamResult{
 			error: mallocError(ErrInvalidHandle.New("host")),
 		}
 	}
@@ -412,7 +436,7 @@ func ListenStreamBlock(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char
 }
 
 //export ListenStream
-func ListenStream(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char, onStream C.OnStreamCallback, additionalParams C.voidPtr) (*C.Libp2pError){
+func ListenStream(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char, onStream C.OnStreamCallback, additionalParams C.voidPtr) *C.Libp2pError {
 	h, ok := universe.Get(hostHandle._handle).(*GoLibp2pHost)
 
 	if !ok {
@@ -429,6 +453,50 @@ func ListenStream(hostHandle *C.Libp2pHost, streamName *C.libp2p_const_char, onS
 	})
 	log.Println("---Register callback---")
 	return nil
+}
+
+//export GetPeerIdFromHost
+func GetPeerIdFromHost(hostHandle *C.Libp2pHost) C.Libp2pStringResult {
+	h, ok := universe.Get(hostHandle._handle).(*GoLibp2pHost)
+
+	if !ok {
+		return C.Libp2pStringResult{
+			error: mallocError(ErrInvalidHandle.New("host")),
+		}
+	}
+
+	derefHost := *h
+	host := *(derefHost.host)
+
+	return C.Libp2pStringResult{
+		string: C.CString(host.ID().String()),
+	}
+}
+
+//export GetPeerIdFromStream
+func GetPeerIdFromStream(streamHandle *C.Libp2pStream) C.Libp2pStringResult {
+	if streamHandle == nil {
+		return C.Libp2pStringResult{
+			error: mallocError(ErrInvalidHandle.New("stream")),
+		}
+	}
+
+	s, ok := universe.Get(streamHandle._handle).(*GoLibp2pStream)
+
+	if !ok {
+		return C.Libp2pStringResult{
+			error: mallocError(ErrInvalidHandle.New("stream")),
+		}
+	}
+
+	derefStream := *s
+	stream := *(derefStream.stream)
+
+	remotePeer := stream.Conn().RemotePeer()
+
+	return C.Libp2pStringResult{
+		string: C.CString(remotePeer.String()),
+	}
 }
 
 func handleConnection(conn net.Conn, stream network.Stream) {
@@ -484,7 +552,7 @@ func handleConnection(conn net.Conn, stream network.Stream) {
 }
 
 //export ConnectUnixSocketWithLibp2pStream
-func ConnectUnixSocketWithLibp2pStream(streamHandle *C.Libp2pStream,  unixSocketFd C.int32_t)  (*C.Libp2pError){
+func ConnectUnixSocketWithLibp2pStream(streamHandle *C.Libp2pStream, unixSocketFd C.int32_t) *C.Libp2pError {
 	file := os.NewFile(uintptr(unixSocketFd), "")
 	conn, err := net.FileConn(file)
 	if err != nil {
@@ -501,6 +569,87 @@ func ConnectUnixSocketWithLibp2pStream(streamHandle *C.Libp2pStream,  unixSocket
 	derefStream := *s
 	stream := *(derefStream.stream)
 	go handleConnection(conn, stream)
+	return nil
+}
+
+//export RegisterMsgHandler
+func RegisterMsgHandler(streamHandle *C.Libp2pStream, onMsg C.OnRecvMsg) *C.Libp2pError {
+	if streamHandle == nil {
+		return mallocError(ErrInvalidHandle.New("stream"))
+	}
+
+	s, ok := universe.Get(streamHandle._handle).(*GoLibp2pStream)
+
+	if !ok {
+		return mallocError(ErrInvalidHandle.New("stream"))
+	}
+
+	derefStream := *s
+	stream := *(derefStream.stream)
+
+	remotePeer := stream.Conn().RemotePeer()
+
+	go func() {
+		const bufferSize = 65536
+		buffer := make([]byte, 0, bufferSize)
+
+		for {
+			tempBuffer := make([]byte, bufferSize)
+			bytesRead, err := stream.Read(tempBuffer)
+			if err != nil && err != io.EOF {
+				fmt.Println("Error reading from stream:", err)
+				break
+			}
+			buffer = append(buffer, tempBuffer[:bytesRead]...)
+
+			for len(buffer) > 0 {
+				if len(buffer) >= 4 {
+					messageSize := binary.BigEndian.Uint32(buffer[:4])
+					if len(buffer) >= int(messageSize)+4 {
+						message := buffer[4 : messageSize+4]
+						C.NewMsg(onMsg, C.CString(remotePeer.String()), (*C.uint8_t)(unsafe.Pointer(&message[0])), C.uint32_t(messageSize))
+						buffer = buffer[messageSize+4:]
+					} else {
+						break
+					}
+				} else {
+					break
+				}
+			}
+		}
+	}()
+	return nil
+}
+
+//export WriteToServiceStream
+func WriteToServiceStream(streamHandle *C.Libp2pStream, data *C.uint8_t, dataSize C.uint32_t) *C.Libp2pError {
+	s, ok := universe.Get(streamHandle._handle).(*GoLibp2pStream)
+
+	if !ok {
+		return mallocError(ErrInvalidHandle.New("stream"))
+	}
+
+	derefStream := *s
+	stream := *(derefStream.stream)
+
+	// Преобразование указателя на данные в срез байтов
+	dataSlice := (*[1 << 30]byte)(unsafe.Pointer(data))[:int(dataSize):int(dataSize)]
+
+	// Создание буфера для отправки
+	buffer := make([]byte, 4+int(dataSize))
+
+	// Кодирование размера данных в 4 байта
+	binary.BigEndian.PutUint32(buffer[:4], uint32(dataSize))
+
+	// Копирование данных после размера
+	copy(buffer[4:], dataSlice)
+
+	_, err := stream.Write(buffer)
+
+	if err != nil {
+		log.Fatalln(err)
+		return mallocError(err)
+	}
 	return nil
 }
 

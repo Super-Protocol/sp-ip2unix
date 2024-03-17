@@ -46,8 +46,16 @@ typedef struct Libp2pReadResult {
     Libp2pError *error;
 } Libp2pReadResult;
 
+typedef struct Libp2pStringResult {
+    const char* string;
+    Libp2pError *error;
+} Libp2pStringResult;
+
 
 typedef void* voidPtr;
 
 typedef void (*OnStreamCallback) (voidPtr additionalParams, Libp2pStream* stream);
 void NewStream(OnStreamCallback f, voidPtr additionalParams, Libp2pStream* stream);
+
+typedef void (*OnRecvMsg) (const char *peerId, uint8_t *data, uint32_t dataSize);
+void NewMsg(OnRecvMsg f, const char *peerId, uint8_t  *data, uint32_t dataSize);
